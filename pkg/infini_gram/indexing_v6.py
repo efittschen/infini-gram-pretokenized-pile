@@ -13,8 +13,237 @@ import sys
 import time
 from tqdm import tqdm
 import transformers
+import struct
 import zstandard as zstd
 transformers.utils.logging.set_verbosity(40) # suppress warnings
+
+# TODO: change to .dataset to import from local utility function (note: this added code if from the polypythia seed huggingface repo)
+import struct
+from functools import lru_cache
+from itertools import accumulate
+from pathlib import Path
+from torch.utils.data import Dataset
+
+dtypes = {1: np.uint8, 2: np.int8, 3: np.int16, 4: np.int32, 5: np.int64, 6: np.float32, 7: np.float64, 8: np.uint16}
+
+
+def index_file_path(prefix_path):
+    return prefix_path + ".idx"
+
+
+def data_file_path(prefix_path):
+    return prefix_path + ".bin"
+
+
+def _warmup_mmap_file(path):
+    with open(path, "rb") as stream:
+        while stream.read(100 * 1024 * 1024):
+            pass
+
+
+class MMapIndexedDataset(Dataset):
+    class Index:
+        _HDR_MAGIC = b"MMIDIDX\x00\x00"
+
+        @classmethod
+        def writer(cls, path, dtype):
+            class _Writer:
+                def __enter__(self):
+                    self._file = open(path, "wb")  # noqa: SIM115
+
+                    # Write Magic string so we can check the file format then opening it again.
+                    self._file.write(cls._HDR_MAGIC)
+                    # Write version number
+                    # Little endian unsigned 64 Bit integer
+                    self._file.write(struct.pack("<Q", 1))
+                    # Little endian unsigned 8 Bit integer
+                    self._file.write(struct.pack("<B", code(dtype)))
+
+                    return self
+
+                @staticmethod
+                def _get_pointers(sizes):
+                    pointers = np.zeros(len(sizes), dtype=np.int64)
+                    sizes = np.array(sizes, dtype=np.int64)
+
+                    np.cumsum(sizes[:-1], out=pointers[1:])
+                    pointers = pointers * dtype().itemsize
+                    return pointers
+
+                def write(self, sizes, doc_idx):
+                    pointers = self._get_pointers(sizes)
+
+                    # Little endian unsigned 64 Bit integer
+                    self._file.write(struct.pack("<Q", len(sizes)))
+                    # Little endian unsigned 64 Bit integer
+                    self._file.write(struct.pack("<Q", len(doc_idx)))
+
+                    sizes = np.array(sizes, dtype=np.int32)
+                    self._file.write(sizes.tobytes(order="C"))
+                    del sizes
+
+                    pointers = np.array(pointers, dtype=np.int64)
+                    self._file.write(pointers.tobytes(order="C"))
+                    del pointers
+
+                    doc_idx = np.array(doc_idx, dtype=np.int64)
+                    self._file.write(doc_idx.tobytes(order="C"))
+
+                def __exit__(self, exc_type, exc_val, exc_tb):
+                    self._file.close()
+
+            return _Writer()
+
+        def __init__(self, path, skip_warmup=False):
+            with open(path, "rb") as stream:
+                magic_test = stream.read(9)
+                assert magic_test == self._HDR_MAGIC, (
+                    "Index file doesn't match expected format. " "Make sure that --dataset-impl is configured properly."
+                )
+                # Little endian unsigned 64 Bit integer
+                version = struct.unpack("<Q", stream.read(8))
+                assert version == (1,)
+
+                # Little endian unsigned 8 Bit integer
+                (dtype_code,) = struct.unpack("<B", stream.read(1))
+                self._dtype = dtypes[dtype_code]
+                self._dtype_size = self._dtype().itemsize
+
+                self._len = struct.unpack("<Q", stream.read(8))[0]
+                self._doc_count = struct.unpack("<Q", stream.read(8))[0]
+                offset = stream.tell()
+
+            if not skip_warmup:
+                print("    warming up index mmap file...")
+                _warmup_mmap_file(path)
+
+            self._bin_buffer_mmap = np.memmap(path, mode="r", order="C")
+            self._bin_buffer = memoryview(self._bin_buffer_mmap)
+            print("    reading sizes...")
+            self._sizes = np.frombuffer(self._bin_buffer, dtype=np.int32, count=self._len, offset=offset)
+            print("    reading pointers...")
+            self._pointers = np.frombuffer(
+                self._bin_buffer, dtype=np.int64, count=self._len, offset=offset + self._sizes.nbytes
+            )
+            print("    reading document index...")
+            self._doc_idx = np.frombuffer(
+                self._bin_buffer,
+                dtype=np.int64,
+                count=self._doc_count,
+                offset=offset + self._sizes.nbytes + self._pointers.nbytes,
+            )
+
+        def __del__(self):
+            self._bin_buffer_mmap._mmap.close()
+            del self._bin_buffer_mmap
+
+        @property
+        def dtype(self):
+            return self._dtype
+
+        @property
+        def sizes(self):
+            return self._sizes
+
+        @property
+        def doc_idx(self):
+            return self._doc_idx
+
+        @lru_cache(maxsize=8)  # noqa: B019
+        def __getitem__(self, i):
+            return self._pointers[i], self._sizes[i]
+
+        def __len__(self):
+            return self._len
+
+    def __init__(self, path, skip_warmup=False):
+        super().__init__()
+
+        self._path = None
+        self._index = None
+        self._bin_buffer = None
+
+        self._do_init(path, skip_warmup)
+
+    def __getstate__(self):
+        return self._path
+
+    def __setstate__(self, state):
+        self._do_init(state)
+
+    def _do_init(self, path, skip_warmup):
+        self._path = path
+        self._index = self.Index(index_file_path(self._path), skip_warmup)
+
+        if not skip_warmup:
+            print("    warming up data mmap file...")
+            _warmup_mmap_file(data_file_path(self._path))
+        print("    creating numpy buffer of mmap...")
+        self._bin_buffer_mmap = np.memmap(data_file_path(self._path), mode="r", order="C")
+        print("    creating memory view of numpy buffer...")
+        self._bin_buffer = memoryview(self._bin_buffer_mmap)
+
+    def __del__(self):
+        self._bin_buffer_mmap._mmap.close()
+        del self._bin_buffer_mmap
+        del self._index
+
+    def __len__(self):
+        return len(self._index)
+
+    # @lru_cache(maxsize=8)
+    def __getitem__(self, idx):
+        if isinstance(idx, int):
+            ptr, size = self._index[idx]
+            np_array = np.frombuffer(self._bin_buffer, dtype=self._index.dtype, count=size, offset=ptr)
+            return np_array
+        elif isinstance(idx, slice):
+            start, stop, step = idx.indices(len(self))
+            if step != 1:
+                raise ValueError("Slices into indexed_dataset must be contiguous")
+            ptr = self._index._pointers[start]
+            sizes = self._index._sizes[idx]
+            offsets = list(accumulate(sizes))
+            total_size = sum(sizes)
+            np_array = np.frombuffer(self._bin_buffer, dtype=self._index.dtype, count=total_size, offset=ptr)
+            sents = np.split(np_array, offsets[:-1])
+            return sents
+
+    def get(self, idx, offset=0, length=None):
+        """Retrieves a single item from the dataset with the option to only
+        return a portion of the item.
+
+        get(idx) is the same as [idx] but get() does not support slicing.
+        """
+        ptr, size = self._index[idx]
+        if length is None:
+            length = size - offset
+        ptr += offset * np.dtype(self._index.dtype).itemsize
+        np_array = np.frombuffer(self._bin_buffer, dtype=self._index.dtype, count=length, offset=ptr)
+        return np_array
+
+    @property
+    def sizes(self):
+        return self._index.sizes
+
+    @property
+    def doc_idx(self):
+        return self._index.doc_idx
+
+    def get_doc_idx(self):
+        return self._index._doc_idx
+
+    def set_doc_idx(self, doc_idx_):
+        self._index._doc_idx = doc_idx_
+
+    @property
+    def supports_prefetch(self):
+        return False
+
+    @staticmethod
+    def exists(path):
+        return os.path.exists(index_file_path(path)) and os.path.exists(data_file_path(path))
+
 
 tokenizer = None
 
@@ -114,6 +343,70 @@ def prepare_fewfiles(args):
     if args.add_metadata:
         mt_fout.close()
         om_fout.close()
+    if args.add_unigram:
+        for token_id, count in sorted(unigram_counts.items()):
+            ug_fout.write(f'{token_id} {count}\n')
+        ug_fout.close()
+
+    end_time = time.time()
+    print(f'Step 1 (prepare): Done. Took {end_time-start_time:.2f} seconds', flush=True)
+
+def prepare_pretokenized(args):
+    ds_path = os.path.join(args.save_dir, f'tokenized')
+    od_path = os.path.join(args.save_dir, f'offset')
+    mt_path = os.path.join(args.save_dir, f'metadata')
+    om_path = os.path.join(args.save_dir, f'metaoff')
+    ug_path = os.path.join(args.save_dir, f'unigram')
+    if all([os.path.exists(path) for path in [ds_path, od_path]]):
+        print('Step 1 (prepare): Skipped. All files already exist.', flush=True)
+        return
+
+    print('Step 1 (prepare): Starting ...', flush=True)
+    start_time = time.time()
+
+    bin_path = list(glob.glob(f'{args.data_dir}/*.bin', recursive=True))
+    assert len(bin_path) == 1, f"Found {len(bin_path)} bin files in {args.data_dir}. Expected 1."
+    bin_path = bin_path[0]
+    assert os.path.exists(bin_path.replace(".bin", ".idx")), f"Index file {bin_path.replace('.bin', '.idx')} does not exist."
+
+    ds = MMapIndexedDataset(bin_path.replace(".bin", ""), skip_warmup=True)
+    
+
+    ds_fout = open(ds_path, 'wb')
+    od_fout = open(od_path, 'wb')
+    if args.add_metadata:
+        mt_fout = open(mt_path, 'wb')
+        om_fout = open(om_path, 'wb')
+    if args.add_unigram:
+        ug_fout = open(ug_path, 'w')
+        unigram_counts = defaultdict(int)
+
+    assert args.token_width == np.dtype(ds._index.dtype).itemsize, f"Token width {args.token_width} does not match dataset token width {np.dtype(ds._index.dtype).itemsize}."
+
+    od = 0
+    if args.add_metadata:
+        om = 0
+    for i, data in enumerate(tqdm(ds)):
+        if args.reversed:
+            data = data[::-1]
+        blob = data.astype(ds._index.dtype, copy=False).tobytes()
+        blob = args.doc_sep + blob
+        ds_fout.write(blob)
+        od_fout.write(struct.pack('<Q', od))
+        od += len(blob)
+        if args.add_metadata:
+            meta = (json.dumps({'doc_id': i}) + '\n').encode('utf-8')
+            mt_fout.write(meta)
+            om_fout.write(struct.pack('<Q', om))
+            om += len(meta)
+        if args.add_unigram:
+            for token_id in data:
+                unigram_counts[token_id] += 1
+            unigram_counts[256**args.token_width-1] += 1
+    gc.collect()
+    ds_fout.close()
+    od_fout.close()
+
     if args.add_unigram:
         for token_id, count in sorted(unigram_counts.items()):
             ug_fout.write(f'{token_id} {count}\n')
@@ -274,9 +567,13 @@ def prepare(args):
         # # The following is a faster version, but the result is a bit different
         # from dolma.tokenizer import Tokenizer
         # tokenizer = Tokenizer.from_pretrained('allenai/gpt-neox-olmo-dolma-v1_5', bos_token_id=None, eos_token_id=None, pad_token_id=1, segment_before_tokenization=True)
+    elif args.tokenizer == 'gpt-neox-20b':
+        tokenizer = transformers.AutoTokenizer.from_pretrained('EleutherAI/gpt-neox-20b', trust_remote_code=True, use_fast=True, add_bos_token=False, add_eos_token=False)
     else:
         raise ValueError(f'Unknown tokenizer: {args.tokenizer}')
 
+    if args.is_pretokenized:
+        prepare_pretokenized(args)
     data_paths = list(sorted(glob.glob(f'{args.data_dir}/**/*.json*', recursive=True)))
     if len(data_paths) < args.cpus:
         prepare_fewfiles(args)
@@ -384,7 +681,7 @@ def main():
     parser.add_argument('--save_dir', type=str, required=True, help='Directory where the final index files are stored. Must be absolute path.')
     parser.add_argument('--version', type=int, default=6, choices=[6], help='Version of the index.')
     parser.add_argument('--reversed', default=False, action='store_true', help='Whether to reverse the tokens in each document.')
-    parser.add_argument('--tokenizer', type=str, default=None, choices=[None, 'gpt2', 'llama', 'olmo'])
+    parser.add_argument('--tokenizer', type=str, default=None, choices=[None, 'gpt2', 'llama', 'olmo', 'gpt-neox-20b'])
     parser.add_argument('--token_dtype', type=str, default='u16', choices=['u8', 'u16', 'u32'], help='Data type for tokens.')
     parser.add_argument('--add_metadata', default=False, action='store_true', help='Whether to store document metadata in the index.')
     parser.add_argument('--add_unigram', default=False, action='store_true', help='Whether to precompute unigram counts.')
@@ -393,6 +690,7 @@ def main():
     parser.add_argument('--cpus', type=int, default=mp.cpu_count(), help='Number of CPU cores available to the program.')
     parser.add_argument('--mem', type=int, required=True, help='Amount of memory in GiB available to the program.')
     parser.add_argument('--ulimit', type=int, default=1048576, help='Maximum number of open files allowed.')
+    parser.add_argument('--is_pretokenized', default=False, action='store_true', help='Whether the input files are already pretokenized.')
     args = parser.parse_args()
 
     if args.temp_dir is None:
