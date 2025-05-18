@@ -1,5 +1,6 @@
 # This is adapted from the GPT-Neox library
 import os
+import os, fcntl, mmap, sys
 import struct
 from functools import lru_cache
 from itertools import accumulate
@@ -109,6 +110,7 @@ class MMapIndexedDataset(Dataset):
                 _warmup_mmap_file(path)
 
             self._bin_buffer_mmap = np.memmap(path, mode="r", order="C")
+            self._bin_buffer_mmap._mmap.madvise(mmap.MADV_DONTNEED)
             self._bin_buffer = memoryview(self._bin_buffer_mmap)
             print("    reading sizes...")
             self._sizes = np.frombuffer(self._bin_buffer, dtype=np.int32, count=self._len, offset=offset)
@@ -171,6 +173,7 @@ class MMapIndexedDataset(Dataset):
             _warmup_mmap_file(data_file_path(self._path))
         print("    creating numpy buffer of mmap...")
         self._bin_buffer_mmap = np.memmap(data_file_path(self._path), mode="r", order="C")
+        self._bin_buffer_mmap._mmap.madvise(mmap.MADV_DONTNEED)
         print("    creating memory view of numpy buffer...")
         self._bin_buffer = memoryview(self._bin_buffer_mmap)
 
@@ -211,6 +214,14 @@ class MMapIndexedDataset(Dataset):
             length = size - offset
         ptr += offset * np.dtype(self._index.dtype).itemsize
         np_array = np.frombuffer(self._bin_buffer, dtype=self._index.dtype, count=length, offset=ptr)
+        page   = mmap.PAGESIZE
+        start  = ptr & ~(page - 1)                    # page-aligned
+        length = ((size * self._index._dtype_size + page - 1)
+                    & ~(page - 1))
+        self._bin_buffer_mmap._mmap.madvise(
+            mmap.MADV_DONTNEED, start, length) 
+        self._index._bin_buffer_mmap._mmap.madvise(
+            mmap.MADV_DONTNEED, start, length)
         return np_array
 
     @property

@@ -11,6 +11,8 @@ import shutil
 import sys
 import time
 from tqdm import tqdm
+import struct
+from .dataset import MMapIndexedDataset
 
 HACK = 100000
 
@@ -53,6 +55,91 @@ def tok(line):
     del metadata['text']
     return byte_arr, metadata
 
+def tokenize_pretokenized(args):
+    ds_paths = [os.path.join(args.save_dir, f'tokenized.{i}') for i in range(args.worker_id, args.shards, args.workers)]
+    od_paths = [os.path.join(args.save_dir, f'offset.{i}') for i in range(args.worker_id, args.shards, args.workers)]
+    mt_paths = [os.path.join(args.save_dir, f'metadata.{i}') for i in range(args.worker_id, args.shards, args.workers)]
+    om_paths = [os.path.join(args.save_dir, f'metaoff.{i}') for i in range(args.worker_id, args.shards, args.workers)]
+    ug_paths = [os.path.join(args.save_dir, f'unigram.{i}') for i in range(args.worker_id, args.shards, args.workers)]
+    if all([os.path.exists(ds_path) for ds_path in ds_paths]) \
+        and all([os.path.exists(od_path) for od_path in od_paths]):
+        print('Step 1 (tokenize): Skipped. All tokenized files already exist.')
+        return
+
+    print('Step 1 (tokenize): Starting ...')
+
+    import transformers
+    transformers.utils.logging.set_verbosity(40) # suppress warnings
+    global tokenizer, token_dtype
+    if args.tokenizer is None:
+        tokenizer = None
+    elif args.tokenizer == 'gpt2':
+        tokenizer = transformers.AutoTokenizer.from_pretrained('gpt2', use_fast=False, add_bos_token=False, add_eos_token=False)
+    elif args.tokenizer == 'llama':
+        tokenizer = transformers.AutoTokenizer.from_pretrained('meta-llama/Llama-2-7b-hf', token=os.environ.get('HF_TOKEN'), use_fast=False, add_bos_token=False, add_eos_token=False) # The fast tokenizer seems unbearably slow ...
+    elif args.tokenizer == 'olmo':
+        tokenizer = transformers.AutoTokenizer.from_pretrained("allenai/OLMo-7B", add_bos_token=False, add_eos_token=False)
+        # # The following is a faster version, but the result is a bit different
+        # from dolma.tokenizer import Tokenizer
+        # tokenizer = Tokenizer.from_pretrained('allenai/gpt-neox-olmo-dolma-v1_5', bos_token_id=None, eos_token_id=None, pad_token_id=1, segment_before_tokenization=True)
+    elif args.tokenizer == 'gpt-neox-20b':
+        tokenizer = transformers.AutoTokenizer.from_pretrained('EleutherAI/gpt-neox-20b', trust_remote_code=True, use_fast=True, add_bos_token=False, add_eos_token=False)
+    else:
+        raise ValueError(f'Unknown tokenizer: {args.tokenizer}')
+
+    bin_path = list(glob.glob(f'{args.data_dir}/*.bin', recursive=True))
+    assert len(bin_path) == 1, f"Found {len(bin_path)} bin files in {args.data_dir}. Expected 1."
+    bin_path = bin_path[0]
+    assert os.path.exists(bin_path.replace(".bin", ".idx")), f"Index file {bin_path.replace('.bin', '.idx')} does not exist."
+
+    ds = MMapIndexedDataset(bin_path.replace(".bin", ""), skip_warmup=True)
+
+    ds_fouts = [open(ds_path, 'wb') for ds_path in ds_paths]
+    od_fouts = [open(od_path, 'wb') for od_path in od_paths]
+    if args.add_metadata:
+        mt_fouts = [open(mt_path, 'wb') for mt_path in mt_paths]
+        om_fouts = [open(om_path, 'wb') for om_path in om_paths]
+    if args.add_unigram:
+        ug_fouts = [open(ug_path, 'w') for ug_path in ug_paths]
+        unigram_counts = [defaultdict(int) for _ in ug_paths]
+    
+    ods = [0 for _ in od_fouts]
+    if args.add_metadata:
+        oms = [0 for _ in om_fouts]
+    
+    for i, data in enumerate(tqdm(ds)):
+        content = data.astype(ds._index.dtype, copy=False).tobytes()
+        content = args.doc_sep + content
+        j = i % (args.shards // args.workers)
+        ds_fouts[j].write(content)
+        od_fouts[j].write(struct.pack('<Q', ods[j]))
+        ods[j] += len(content)
+        if args.add_metadata:
+            meta = (json.dumps({'doc_id': i}) + '\n').encode('utf-8')
+            mt_fouts[j].write(meta)
+            om_fouts[j].write(struct.pack('<Q', oms[j]))
+            oms[j] += len(meta)
+        if args.add_unigram:
+            token_ids = np.frombuffer(content, dtype=np.uint8).view(token_dtype)
+            for token_id in token_ids:
+                unigram_counts[j][token_id] += 1
+
+    for ds_fout in ds_fouts:
+        ds_fout.close()
+    for od_fout in od_fouts:
+        od_fout.close()
+    if args.add_metadata:
+        for mt_fout in mt_fouts:
+            mt_fout.close()
+        for om_fout in om_fouts:
+            om_fout.close()
+    if args.add_unigram:
+        for j, ug_fout in enumerate(ug_fouts):
+            for token_id, count in sorted(unigram_counts[j].items()):
+                ug_fout.write(f'{token_id} {count}\n')
+            ug_fout.close()
+
+
 def tokenize(args):
 
     ds_paths = [os.path.join(args.save_dir, f'tokenized.{i}') for i in range(args.worker_id, args.shards, args.workers)]
@@ -81,6 +168,8 @@ def tokenize(args):
         # # The following is a faster version, but the result is a bit different
         # from dolma.tokenizer import Tokenizer
         # tokenizer = Tokenizer.from_pretrained('allenai/gpt-neox-olmo-dolma-v1_5', bos_token_id=None, eos_token_id=None, pad_token_id=1, segment_before_tokenization=True)
+    #elif args.tokenizer == 'gpt-neox-20b':
+    #    tokenizer = transformers.AutoTokenizer.from_pretrained('EleutherAI/gpt-neox-20b', trust_remote_code=True, use_fast=True, add_bos_token=False, add_eos_token=False)
     else:
         raise ValueError(f'Unknown tokenizer: {args.tokenizer}')
 
@@ -241,7 +330,7 @@ def main():
     parser.add_argument('--temp_dir', type=str, default=None, help='Directory where temporary indexing files are stored. Must be absolute path.')
     parser.add_argument('--save_dir', type=str, required=True, help='Directory where the final index files are stored. Must be absolute path.')
     parser.add_argument('--version', type=int, default=4, choices=[4, 5], help='Version of the index.')
-    parser.add_argument('--tokenizer', type=str, default=None, choices=[None, 'gpt2', 'llama', 'olmo'])
+    parser.add_argument('--tokenizer', type=str, default=None, choices=[None, 'gpt2', 'llama', 'olmo', 'gpt-neox-20b'])
     parser.add_argument('--token_dtype', type=str, default='u16', choices=['u8', 'u16', 'u32'], help='Data type for tokens.')
     parser.add_argument('--add_metadata', default=False, action='store_true', help='Whether to store document metadata in the index.')
     parser.add_argument('--add_unigram', default=False, action='store_true', help='Whether to precompute unigram counts.')
@@ -252,6 +341,7 @@ def main():
     parser.add_argument('--cpus', type=int, default=mp.cpu_count(), help='Number of CPU cores available to the program.')
     parser.add_argument('--mem', type=int, required=True, help='Amount of memory in GiB available to the program.')
     parser.add_argument('--ulimit', type=int, default=1048576, help='Maximum number of open files allowed.')
+    parser.add_argument('--is_pretokenized', default=False, action='store_true', help='Whether the input files are already pretokenized.')
     args = parser.parse_args()
 
     if args.temp_dir is None:
@@ -291,7 +381,10 @@ def main():
     assert sys.byteorder == 'little'
     resource.setrlimit(resource.RLIMIT_NOFILE, (args.ulimit, args.ulimit))
 
-    tokenize(args)
+    if args.is_pretokenized:
+        tokenize_pretokenized(args)
+    else:
+        tokenize(args)
     build_sa(args)
 
 if __name__ == '__main__':
