@@ -150,6 +150,9 @@ PYBIND11_MODULE(cpp_engine, m) {
         .def("get_new_shards_by_index_dir", &Engine<U8>::get_new_shards_by_index_dir, py::call_guard<py::gil_scoped_release>())
         .def("compute_unigram_counts", &Engine<U8>::compute_unigram_counts, "s"_a)
         .def("find", &Engine<U8>::find, py::call_guard<py::gil_scoped_release>(), "input_ids"_a)
+        .def("find_thread", &Engine<U8>::find_thread, py::call_guard<py::gil_scoped_release>(), "s"_a, "input_ids"_a, "hint_segment"_a)
+        .def("warmup_tokens", &Engine<U8>::warmup_tokens, py::call_guard<py::gil_scoped_release>(), "s"_a, "pin"_a = false)
+        .def("warmup_segment", &Engine<U8>::warmup_segment, py::call_guard<py::gil_scoped_release>(), "s"_a, "seg"_a, "pin"_a = false)
         .def("find_cnf", &Engine<U8>::find_cnf, py::call_guard<py::gil_scoped_release>(), "cnf"_a, "max_clause_freq"_a, "max_diff_tokens"_a)
         .def("count", &Engine<U8>::count, py::call_guard<py::gil_scoped_release>(), "input_ids"_a)
         .def("count_cnf", &Engine<U8>::count_cnf, py::call_guard<py::gil_scoped_release>(), "cnf"_a, "max_clause_freq"_a, "max_diff_tokens"_a)
@@ -176,6 +179,8 @@ PYBIND11_MODULE(cpp_engine, m) {
         .def("get_ds_size", &Engine<U8>::get_ds_size, py::call_guard<py::gil_scoped_release>(), "s"_a)
         .def("get_total_doc_cnt", &Engine<U8>::get_total_doc_cnt, py::call_guard<py::gil_scoped_release>())
         .def("creativity", &Engine<U8>::creativity, py::call_guard<py::gil_scoped_release>(), "input_ids"_a)
+        .def("get_ptr_by_rank", &Engine<U8>::get_ptr_by_rank, py::call_guard<py::gil_scoped_release>(), "s"_a, "rank"_a)
+        .def("get_doc_ptr", &Engine<U8>::get_doc_ptr, py::call_guard<py::gil_scoped_release>(), "doc_ix"_a)
         .def("attribute", &Engine<U8>::attribute, py::call_guard<py::gil_scoped_release>(), "input_ids"_a, "delim_ids"_a, "min_len"_a, "max_cnt"_a, "enforce_bow"_a);
 
     py::class_<Engine<U16>>(m, "Engine_U16")
@@ -183,6 +188,9 @@ PYBIND11_MODULE(cpp_engine, m) {
         .def("get_new_shards_by_index_dir", &Engine<U16>::get_new_shards_by_index_dir, py::call_guard<py::gil_scoped_release>())
         .def("compute_unigram_counts", &Engine<U16>::compute_unigram_counts, "s"_a)
         .def("find", &Engine<U16>::find, py::call_guard<py::gil_scoped_release>(), "input_ids"_a)
+        .def("find_thread", &Engine<U16>::find_thread, py::call_guard<py::gil_scoped_release>(), "s"_a, "input_ids"_a, "hint_segment"_a)
+        .def("warmup_tokens", &Engine<U16>::warmup_tokens, py::call_guard<py::gil_scoped_release>(), "s"_a, "pin"_a = false)
+        .def("warmup_segment", &Engine<U16>::warmup_segment, py::call_guard<py::gil_scoped_release>(), "s"_a, "seg"_a, "pin"_a = false)
         .def("find_cnf", &Engine<U16>::find_cnf, py::call_guard<py::gil_scoped_release>(), "cnf"_a, "max_clause_freq"_a, "max_diff_tokens"_a)
         .def("count", &Engine<U16>::count, py::call_guard<py::gil_scoped_release>(), "input_ids"_a)
         .def("count_cnf", &Engine<U16>::count_cnf, py::call_guard<py::gil_scoped_release>(), "cnf"_a, "max_clause_freq"_a, "max_diff_tokens"_a)
@@ -209,6 +217,8 @@ PYBIND11_MODULE(cpp_engine, m) {
         .def("get_ds_size", &Engine<U16>::get_ds_size, py::call_guard<py::gil_scoped_release>(), "s"_a)
         .def("get_total_doc_cnt", &Engine<U16>::get_total_doc_cnt, py::call_guard<py::gil_scoped_release>())
         .def("creativity", &Engine<U16>::creativity, py::call_guard<py::gil_scoped_release>(), "input_ids"_a)
+        .def("get_ptr_by_rank", &Engine<U16>::get_ptr_by_rank, py::call_guard<py::gil_scoped_release>(), "s"_a, "rank"_a)
+        .def("get_doc_ptr", &Engine<U16>::get_doc_ptr, py::call_guard<py::gil_scoped_release>(), "doc_ix"_a)
         .def("attribute", &Engine<U16>::attribute, py::call_guard<py::gil_scoped_release>(), "input_ids"_a, "delim_ids"_a, "min_len"_a, "max_cnt"_a, "enforce_bow"_a);
 
     py::class_<Engine<U32>>(m, "Engine_U32")
@@ -216,6 +226,9 @@ PYBIND11_MODULE(cpp_engine, m) {
         .def("get_new_shards_by_index_dir", &Engine<U32>::get_new_shards_by_index_dir, py::call_guard<py::gil_scoped_release>())
         .def("compute_unigram_counts", &Engine<U32>::compute_unigram_counts, "s"_a)
         .def("find", &Engine<U32>::find, py::call_guard<py::gil_scoped_release>(), "input_ids"_a)
+        .def("find_thread", &Engine<U32>::find_thread, py::call_guard<py::gil_scoped_release>(), "s"_a, "input_ids"_a, "hint_segment"_a)
+        .def("warmup_tokens", &Engine<U32>::warmup_tokens, py::call_guard<py::gil_scoped_release>(), "s"_a, "pin"_a = false)
+        .def("warmup_segment", &Engine<U32>::warmup_segment, py::call_guard<py::gil_scoped_release>(), "s"_a, "seg"_a, "pin"_a = false)
         .def("find_cnf", &Engine<U32>::find_cnf, py::call_guard<py::gil_scoped_release>(), "cnf"_a, "max_clause_freq"_a, "max_diff_tokens"_a)
         .def("count", &Engine<U32>::count, py::call_guard<py::gil_scoped_release>(), "input_ids"_a)
         .def("count_cnf", &Engine<U32>::count_cnf, py::call_guard<py::gil_scoped_release>(), "cnf"_a, "max_clause_freq"_a, "max_diff_tokens"_a)
@@ -242,6 +255,8 @@ PYBIND11_MODULE(cpp_engine, m) {
         .def("get_ds_size", &Engine<U32>::get_ds_size, py::call_guard<py::gil_scoped_release>(), "s"_a)
         .def("get_total_doc_cnt", &Engine<U32>::get_total_doc_cnt, py::call_guard<py::gil_scoped_release>())
         .def("creativity", &Engine<U32>::creativity, py::call_guard<py::gil_scoped_release>(), "input_ids"_a)
+        .def("get_ptr_by_rank", &Engine<U32>::get_ptr_by_rank, py::call_guard<py::gil_scoped_release>(), "s"_a, "rank"_a)
+        .def("get_doc_ptr", &Engine<U32>::get_doc_ptr, py::call_guard<py::gil_scoped_release>(), "doc_ix"_a)
         .def("attribute", &Engine<U32>::attribute, py::call_guard<py::gil_scoped_release>(), "input_ids"_a, "delim_ids"_a, "min_len"_a, "max_cnt"_a, "enforce_bow"_a);
 
     py::class_<EngineDiff<U8>, Engine<U8>>(m, "EngineDiff_U8")

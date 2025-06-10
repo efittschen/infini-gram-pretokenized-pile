@@ -382,6 +382,27 @@ public:
         return FindResult{ .cnt = cnt, .segment_by_shard = segment_by_shard, };
     }
 
+    FindResult find_thread(
+        const size_t s,
+        const vector<T> input_ids,
+        const pair<U64, U64> hint_segment) const {
+
+        vector<T> reversed_input_ids;
+        const U8* input_buf;
+        if (_version == 4) {
+            input_buf = reinterpret_cast<const U8*>(input_ids.data());
+        } else if (_version == 5) {
+            reversed_input_ids = input_ids;
+            reverse(reversed_input_ids.begin(), reversed_input_ids.end());
+            input_buf = reinterpret_cast<const U8*>(reversed_input_ids.data());
+        }
+        U64 num_bytes = input_ids.size() * sizeof(T);
+
+        pair<U64, U64> segment;
+        _find_thread(s, input_buf, num_bytes, hint_segment, &segment);
+        return FindResult{ .cnt = segment.second - segment.first, .segment_by_shard = {segment} };
+    }
+
     void _find_thread(
         const size_t s,
         const U8* const input_buf,
@@ -1007,6 +1028,21 @@ public:
         }
 
         return DocResult<T>{ .doc_ix = doc_ix, .doc_len = doc_len, .disp_len = disp_len, .needle_offset = needle_offset, .metadata = metadata, .token_ids = token_ids, };
+    }
+
+    U64 get_ptr_by_rank(size_t s, U64 rank) const {
+        assert(s < _num_shards && rank < _shards[s].tok_cnt);
+        return _convert_rank_to_ptr(_shards[s], rank);
+    }
+
+    U64 get_doc_ptr(U64 doc_ix) const {
+        assert(s < _num_shards && doc_ix < get_total_doc_cnt());
+        size_t s = 0;
+        while (doc_ix >= _shards[s].doc_cnt) {
+            doc_ix -= _shards[s].doc_cnt;
+            s++;
+        }
+        return _convert_doc_ix_to_ptr(_shards[s], doc_ix);
     }
 
     void get_doc_by_ptr_inplace(const size_t s, const U64 ptr, const U64 max_disp_len, DocResult<T>* const thread_output) const {
